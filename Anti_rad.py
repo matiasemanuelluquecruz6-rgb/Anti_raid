@@ -9,10 +9,10 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 
 SPAM_LIMIT = 20
 SPAM_WINDOW = 15
-CHANNEL_CREATE_LIMIT = 5
-CHANNEL_DELETE_LIMIT = 5
+CHANNEL_CREATE_LIMIT = 2
+CHANNEL_DELETE_LIMIT = 2
 MESSAGE_DELETE_LIMIT = 25
-ACTION_WINDOW = 10
+ACTION_WINDOW = 8
 
 enabled_guilds = set()
 spam_history = defaultdict(deque)
@@ -71,15 +71,23 @@ async def emergency_response(guild, actor, reason):
 
     emergency_running.add(guild.id)
     try:
-        actor_text = (
-            f"{actor} (`{actor.id}`)" if actor else "No identificado"
-        )
+        actor_text = f"{actor} (`{actor.id}`)" if actor else "No identificado"
 
-        # Elimina canales creados recientemente por el responsable.
+        # 1) PRIMERO EXPULSAR AL RESPONSABLE.
+        if actor and actor.id != guild.owner_id and can_manage(guild, actor):
+            try:
+                await actor.kick(
+                    reason=f"Anti-rad.Bot: responsable de ataque - {reason}"
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+
+        # 2) DESPUÉS ELIMINAR HASTA 100 CANALES CREADOS POR EL RESPONSABLE.
+        deleted_count = 0
         if actor:
             try:
                 async for entry in guild.audit_logs(
-                    limit=100,
+                    limit=200,
                     action=discord.AuditLogAction.channel_create,
                 ):
                     age = (discord.utils.utcnow() - entry.created_at).total_seconds()
@@ -92,13 +100,17 @@ async def emergency_response(guild, actor, reason):
                             await channel.delete(
                                 reason="Anti-rad.Bot: canal creado durante ataque"
                             )
-                        except (discord.Forbidden, discord.HTTPException):
+                            deleted_count += 1
+                            if deleted_count >= 100:
+                                break
+                        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                             pass
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
-        # Expulsa bots recientes que el bot pueda moderar.
-        cutoff = discord.utils.utcnow().timestamp() - 60
+        # 3) Expulsar bots recientes que el bot pueda moderar.
+        cutoff = discord.utils.utcnow().timestamp() - 30
+        kicked_bots = 0
         for member in list(guild.members):
             if not member.bot or member.joined_at is None:
                 continue
@@ -110,6 +122,7 @@ async def emergency_response(guild, actor, reason):
                 await member.kick(
                     reason=f"Anti-rad.Bot: bot durante ataque - {reason}"
                 )
+                kicked_bots += 1
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
@@ -117,12 +130,68 @@ async def emergency_response(guild, actor, reason):
             guild,
             "🚨 Anti-Raid: emergencia",
             f"**Responsable:** {actor_text}\n"
-            f"**Motivo:** {reason}\n\n"
-            "Se aplicó la respuesta disponible según los permisos y "
-            "la jerarquía de Discord.",
+            f"**Motivo:** {reason}\n"
+            f"**Canales eliminados:** {deleted_count}/100\n"
+            f"**Bots expulsados:** {kicked_bots}\n\n"
+            "El responsable fue expulsado antes de iniciar la limpieza.",
         )
     finally:
         emergency_running.discard(guild.id)
+
+
+async def protect_guild_update(guild, before, after):
+    # Detecta cambios sensibles del servidor usando la auditoría.
+    name_changed = before.name != after.name
+    icon_changed = before.icon != after.icon
+    banner_changed = before.banner != after.banner
+
+    if not (name_changed or icon_changed or banner_changed):
+        return
+
+    actor = None
+    try:
+        async for entry in guild.audit_logs(
+            limit=15,
+            action=discord.AuditLogAction.guild_update,
+        ):
+            age = (discord.utils.utcnow() - entry.created_at).total_seconds()
+            if age > 10:
+                continue
+
+            changes = {change.key for change in entry.changes}
+            if changes.intersection({"name", "icon", "banner"}):
+                actor = entry.user
+                break
+    except (discord.Forbidden, discord.HTTPException):
+        return
+
+    if actor is None or actor.id == guild.owner_id:
+        return
+
+    cambios = []
+    if name_changed:
+        cambios.append("nombre")
+    if icon_changed:
+        cambios.append("foto de perfil/icono")
+    if banner_changed:
+        cambios.append("fondo/banner")
+
+    # Expulsar al responsable del cambio.
+    if can_manage(guild, actor):
+        try:
+            await actor.kick(
+                reason=f"Anti-rad.Bot: cambio no autorizado de {', '.join(cambios)}"
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    await send_log(
+        guild,
+        "🚨 Cambio de servidor detectado",
+        f"**Responsable:** {actor} (`{actor.id}`)\n"
+        f"**Cambios:** {', '.join(cambios)}\n"
+        "El responsable fue expulsado.",
+    )
 
 
 intents = discord.Intents.default()
@@ -373,6 +442,13 @@ async def on_guild_channel_delete(channel):
             actor,
             f"borrado excesivo de canales ({len(history)} en {ACTION_WINDOW}s)",
         )
+
+
+@bot.event
+async def on_guild_update(before, after):
+    if after.id not in enabled_guilds:
+        return
+    await protect_guild_update(after, before, after)
 
 
 @bot.event
